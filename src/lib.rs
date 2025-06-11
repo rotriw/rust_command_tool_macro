@@ -3,7 +3,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use syn::Ident;
 use quote::{quote, ToTokens};
-use std::fs;
+use std::{fs, path::Path};
 use syn::{parse_macro_input, ItemFn};
 
 fn parse_token(item: TokenStream) -> Result<(String, Ident), syn::Error> {
@@ -44,10 +44,21 @@ fn parse_token(item: TokenStream) -> Result<(String, Ident), syn::Error> {
     Ok((src, exec_func))
 }
 
-//item -> { path = "/tests/src/command", exec_func="exec_command" }
-#[proc_macro]
-pub fn generate_commands(item: TokenStream) -> TokenStream {
-    let (command_dir, execfunc) = parse_token(item).unwrap();
+fn generate_from_dir(
+    command_dir: &str,
+    ident_basic: &str,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let path_name = Path::new(command_dir).file_name();
+    let now_ident = if ident_basic.is_empty() {
+        format!("{}", path_name.unwrap().to_str().unwrap())
+    } else {
+        format!("{}::{}", ident_basic, path_name.unwrap().to_str().unwrap())
+    };
+    dbg!(&command_dir);
+    let mut command_info = Modfile {
+        command_name: String::new(),
+        description: String::new(),
+    };
     let mut subcommands = Vec::new();
     let mut run_functions = Vec::new();
     for entry in fs::read_dir(command_dir).expect("Failed to read command directory") {
@@ -60,11 +71,29 @@ pub fn generate_commands(item: TokenStream) -> TokenStream {
             let content = fs::read_to_string(&path).expect("Failed to read file");
             if let Some((command, run_function)) = parse_command_and_run_from_file(
                 &content,
-                path.file_stem().unwrap().to_str().unwrap(),
+                format!("{}::{}", now_ident, path.file_stem().unwrap().to_str().unwrap()).as_str(),
             ) {
                 subcommands.push(command);
                 run_functions.push(run_function);
             }
+        }
+        if path.is_file()
+            && path.file_name().unwrap() == "mod.rs"
+        {
+            let content = fs::read_to_string(&path).expect("Failed to read mod.rs file");
+            command_info = parse_modfile(&content);
+        }
+        if path.is_dir() {
+            // subcommand
+            let (generate_code, match_code) = generate_from_dir(path.to_str().unwrap(), now_ident.as_str());
+            subcommands.push(generate_code);
+            let command_name = proc_macro2::Literal::string(
+                command_info.command_name.as_str(),
+            );
+            run_functions.push((
+                quote! { #command_name },
+                match_code,
+            ));
         }
     }
     let subcommands_code = subcommands.into_iter().map(|cmd| {
@@ -72,6 +101,7 @@ pub fn generate_commands(item: TokenStream) -> TokenStream {
             .subcommand(#cmd)
         }
     });
+
     let match_arms = run_functions
         .into_iter()
         .map(|(cmd_name, run_function_call)| {
@@ -81,23 +111,23 @@ pub fn generate_commands(item: TokenStream) -> TokenStream {
                 }
             }
         });
-    let expanded = quote! {
-        pub fn build_cli() -> clap::Command {
-            clap::Command::new("bangumidownload")
-            .arg_required_else_help(true)
-                #(#subcommands_code)*
-        }
-        pub fn #execfunc() {
-            let matches = build_cli().get_matches();
-            match matches.subcommand() {
-                #(#match_arms,)*
-                Some((_,_)) => {}
-                None => { log::warn!("") }
-            }
-        }
+    let command_name = proc_macro2::Literal::string(command_info.command_name.as_str());
+    let description = proc_macro2::Literal::string(command_info.description.as_str());
+    let generate_code = quote! {
+        clap::Command::new(#command_name)
+        .arg_required_else_help(true)
+        .about(#description)
+        #(#subcommands_code)*
     };
 
-    TokenStream::from(expanded)
+    let match_code = quote! {
+        match matches.subcommand() {
+            #(#match_arms,)*
+            Some((_,_)) => {}
+            None => { log::warn!("") }
+        }
+    };
+    (generate_code, match_code)
 }
 
 fn parse_command_and_run_from_file(
@@ -202,7 +232,7 @@ fn parse_command_and_run_from_file(
                     let value_name = option_args[2].trim_start_matches('<').trim_end_matches('>');
                     let short_flag_char = short_flag.chars().next().unwrap();
                     options.push(quote! {
-                        .arg(clap::Arg::new(#option_name)
+                        .arg(clap::Arg::new(#value_name)
                             .short(#short_flag_char)
                             .long(#option_name)
                             .value_name(#value_name)
@@ -237,18 +267,41 @@ fn parse_command_and_run_from_file(
         if type_d.starts_with("Option<") {
             let type_d_inner = type_d.trim_start_matches("Option<");
             let type_d_inner = type_d_inner[..type_d_inner.len() - 1].to_string();
-            let type_d_ident = syn::parse_str::<syn::Type>(type_d_inner.as_str()).unwrap();
-            quote! { { let _res = sub_m.get_one::<#type_d_ident>(#arg_name); if _res == None {
-                None
+            // check vector
+            if type_d_inner.starts_with("Vec<") {
+                let type_d_inner = type_d_inner.trim_start_matches("Vec<");
+                let type_d_inner = type_d_inner[..type_d_inner.len() - 1].to_string();
+                let type_d_ident = syn::parse_str::<syn::Type>(type_d_inner.as_str()).unwrap();
+                quote! { { let _res = sub_m.get_matches::<Vec<#type_d_ident>>(#arg_name); if _res == None {
+                    None
+                } else {
+                    Some(_res.unwrap().clone())
+                } } }
             } else {
-                Some(_res.unwrap().clone())
-            } } }
+                let type_d_ident = syn::parse_str::<syn::Type>(type_d_inner.as_str()).unwrap();
+                quote! { { let _res = sub_m.get_one::<#type_d_ident>(#arg_name); if _res == None {
+                    None
+                } else {
+                    Some(_res.unwrap().clone())
+                } } }
+            }
         } else {
-            let type_d_ident = syn::Ident::new(type_d, proc_macro2::Span::call_site());
-            quote! { sub_m.get_one::<#type_d_ident>(#arg_name).unwrap().clone() }
+            if type_d.starts_with("Vec<") {
+                let type_d_inner = type_d.trim_start_matches("Vec<");
+                let type_d_inner = type_d_inner[..type_d_inner.len() - 1].to_string();
+                let type_d_ident = syn::Ident::new(type_d_inner.as_str(), proc_macro2::Span::call_site());
+                dbg!("test");
+                quote! { sub_m.get_one::<Vec<#type_d_ident>>(#arg_name).unwrap().clone() }
+            } else {
+                let type_d_ident = syn::Ident::new(type_d, proc_macro2::Span::call_site());
+                quote! { sub_m.get_one::<#type_d_ident>(#arg_name).unwrap().clone() }
+            }
         }
     });
-    let func_ident = syn::Ident::new(path, proc_macro2::Span::call_site());
+    let func_idents = path.split("::").collect::<Vec<&str>>();
+    let func_ident = func_idents.iter().map(|s| {
+        syn::Ident::new(s, proc_macro2::Span::call_site())
+    });
     Some((
         quote! {
             clap::Command::new(#command_name)
@@ -258,9 +311,52 @@ fn parse_command_and_run_from_file(
         (
             quote! { #command_name },
             quote! {
-
-                command::#func_ident::run(#(#run_fn_call),*);
+                #(#func_ident)::*::run(#(#run_fn_call),*);
             },
         ),
     ))
+}
+
+struct Modfile {
+    command_name: String,
+    description: String,
+}
+
+fn parse_modfile(
+    content: &str
+) -> Modfile {
+    let router_line = content
+        .lines()
+        .find(|line| line.starts_with("//! router:"))
+        .unwrap();
+    let description_line = content
+        .lines()
+        .find(|line| line.starts_with("//! description:"))
+        .unwrap();
+    let command_name = router_line.trim_start_matches("//! router:").trim().to_string();
+    let description = description_line
+        .trim_start_matches("//! description:")
+        .trim()
+        .to_string();
+    Modfile {
+        command_name,
+        description,
+    }
+}
+
+#[proc_macro]
+pub fn generate_commands(item: TokenStream) -> TokenStream {
+    let (command_dir, execfunc) = parse_token(item).unwrap();
+    let (generate_code, match_code) = generate_from_dir(command_dir.as_str(), "");
+    let expanded = quote! {
+        pub fn build_cli() -> clap::Command {
+            #generate_code
+        }
+        pub fn #execfunc() {
+            let matches = build_cli().get_matches();
+            #match_code
+        }
+    };
+
+    TokenStream::from(expanded)
 }
