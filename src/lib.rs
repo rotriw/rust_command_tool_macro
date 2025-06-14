@@ -9,7 +9,6 @@ use syn::{parse_macro_input, ItemFn};
 fn parse_token(item: TokenStream) -> Result<(String, Ident), syn::Error> {
     let input = item.to_string();
     let parts: Vec<&str> = input.split('\"').collect();
-    dbg!(&parts);
     let mut src = String::from("src/command");
     let mut exec_func = String::from("exec_command");
     let mut is_src = false;
@@ -23,8 +22,6 @@ fn parse_token(item: TokenStream) -> Result<(String, Ident), syn::Error> {
             is_exec_func = true;
             continue;
         }
-        dbg!(&part);
-        dbg!(&is_src, &is_exec_func);
         if is_src && is_exec_func {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -54,7 +51,6 @@ fn generate_from_dir(
     } else {
         format!("{}::{}", ident_basic, path_name.unwrap().to_str().unwrap())
     };
-    dbg!(&command_dir);
     let mut command_info = Modfile {
         command_name: String::new(),
         description: String::new(),
@@ -261,6 +257,7 @@ fn parse_command_and_run_from_file(
     // then run find first ) and first }
     let run_fn_signature = run_fn_signature.split(')').next().unwrap();
     let run_fn_args: Vec<&str> = run_fn_signature.split(',').collect();
+    let run_fn_args: Vec<&str> = run_fn_args.iter().filter(|arg| !arg.trim().is_empty()).map(|arg| arg.trim()).collect();
     let run_fn_call = run_fn_args.iter().map(|arg| {
         let arg_name = arg.split(':').next().unwrap().trim();
         let type_d = arg.split(':').nth(1).unwrap().trim();
@@ -290,7 +287,6 @@ fn parse_command_and_run_from_file(
                 let type_d_inner = type_d.trim_start_matches("Vec<");
                 let type_d_inner = type_d_inner[..type_d_inner.len() - 1].to_string();
                 let type_d_ident = syn::Ident::new(type_d_inner.as_str(), proc_macro2::Span::call_site());
-                dbg!("test");
                 quote! { sub_m.get_one::<Vec<#type_d_ident>>(#arg_name).unwrap().clone() }
             } else {
                 let type_d_ident = syn::Ident::new(type_d, proc_macro2::Span::call_site());
