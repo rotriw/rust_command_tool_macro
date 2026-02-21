@@ -67,10 +67,12 @@ pub mod abc;
 //! --port -p <port>, server port (optional\, default: read by config or 1824)
 //! --worker -w <worker>, worker number (optional\, default: 4)
 
+use command_tool::run;
 
-pub fn run(log_level: String, config: Option<String>, port: Option<String>, worker: Option<String>) {
+#[run]
+pub fn start_server(log_level: String, config: Option<String>, port: Option<String>, worker: Option<String>) {
     // your code .....
 }
 ```
 
-您的 `start.rs` 代码中必须包含一个 `run` 函数，在 `run` 函数中每个变量应为 `Option<T>` 或 `T` (`T` 应为 Clap 可以转化的类型如浮点类型、整数类型 或 `String`)
+您的 `start.rs` 代码中必须包含一个带 `#[run]` 标记的函数。该函数名可以自定义，在函数中每个变量应为 `Option<T>` 或 `T` (`T` 应为 Clap 可以转化的类型如浮点类型、整数类型 或 `String`)
